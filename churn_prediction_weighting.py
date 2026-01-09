@@ -53,4 +53,25 @@ model_weighted.fit(X_train, y_train, sample_weight=weights)
 y_pred_b = model_weighted.predict(X_test)
 print(f"[方案 B: 样本加权] 9月召回率: {recall_score(y_test, y_pred_b):.2%}")
 
-print("\n结论：通过给‘近期数据’加大权重，AI 成功摆脱了陈旧经验的束缚，更敏锐地捕捉到了新趋势。")
+# --- 诊断环节：为什么加权反而没用？ ---
+print("\n--- 诊断：AI 到底看重什么？(特征重要性) ---")
+print("方案 A (普通):", dict(zip(features, model_normal.feature_importances_.round(2))))
+print("方案 B (加权):", dict(zip(features, model_weighted.feature_importances_.round(2))))
+
+# --- 方案 C: 滑动窗口 (Rolling Window) ---
+# 既然旧数据在“捣乱”，告诉 AI 流量低没事，那我们干脆直接扔掉旧数据！
+# 只用 7-8 月训练
+print("\n--- 方案 C: 滑动窗口 (只用7-8月数据) ---")
+train_df_recent = df[df['月份'].isin([7, 8])].copy()
+X_train_recent = train_df_recent[features]
+y_train_recent = train_df_recent['是否流失']
+
+model_rolling = RandomForestClassifier(random_state=42)
+model_rolling.fit(X_train_recent, y_train_recent)
+
+y_pred_c = model_rolling.predict(X_test)
+print(f"[方案 C: 滑动窗口] 9月召回率: {recall_score(y_test, y_pred_c):.2%}")
+
+print("\n最终总结：")
+print("1. 如果方案 B 的‘流量’重要性没显著提升，说明旧数据干扰太强。")
+print("2. 方案 C 通常是解决‘规律彻底反转’的最好办法。")
