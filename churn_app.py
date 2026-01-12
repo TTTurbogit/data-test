@@ -5,10 +5,19 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import LabelEncoder
 import matplotlib.pyplot as plt
 import time
+import platform
+import matplotlib.font_manager as fm
 
-
-# 设置中文 (Seaborn 也会用到 Matplotlib 的配置)
-plt.rcParams['font.sans-serif'] = ['SimHei']
+# --- 0. 解决中文乱码 (Windows/Linux 自动适配) ---
+system_name = platform.system()
+if system_name == "Windows":
+    plt.rcParams['font.sans-serif'] = ['SimHei']
+elif system_name == "Linux":
+    # 尝试加载云端安装的 Noto 字体
+    try:
+        plt.rcParams['font.sans-serif'] = ['Noto Sans CJK SC', 'WenQuanYi Micro Hei', 'DejaVu Sans']
+    except:
+        pass
 plt.rcParams['axes.unicode_minus'] = False 
 
 # --- 1. 页面配置 ---
