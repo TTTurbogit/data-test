@@ -7,17 +7,34 @@ import matplotlib.pyplot as plt
 import time
 import platform
 import matplotlib.font_manager as fm
+import os
 
 # --- 0. 解决中文乱码 (Windows/Linux 自动适配) ---
 system_name = platform.system()
 if system_name == "Windows":
     plt.rcParams['font.sans-serif'] = ['SimHei']
 elif system_name == "Linux":
-    # 尝试加载云端安装的 Noto 字体
-    try:
-        plt.rcParams['font.sans-serif'] = ['Noto Sans CJK SC', 'WenQuanYi Micro Hei', 'DejaVu Sans']
-    except:
-        pass
+    # 方案 B: 暴力搜寻法 (直接找字体文件，不猜名字)
+    font_files = fm.findSystemFonts(fontpaths=['/usr/share/fonts'])
+    found_font = False
+    for file in font_files:
+        # 找一个带 CJK (中日韩) 的字体文件
+        if 'CJK' in file and ('SC' in file or 'Sim' in file or 'Noto' in file):
+            try:
+                # 强制添加该字体文件
+                fm.fontManager.addfont(file)
+                # 获取它的真实注册名称
+                prop = fm.FontProperties(fname=file)
+                plt.rcParams['font.sans-serif'] = [prop.get_name()]
+                # print(f"成功加载中文字体: {file} -> {prop.get_name()}")
+                found_font = True
+                break
+            except Exception as e:
+                pass
+    
+    if not found_font:
+        # 最后的兜底：如果实在找不到，就用系统默认的无衬线字体，虽然可能还是乱码，但至少不报错
+        plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False 
 
 # --- 1. 页面配置 ---
