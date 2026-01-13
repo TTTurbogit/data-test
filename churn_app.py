@@ -2,178 +2,223 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import LabelEncoder
 import matplotlib.pyplot as plt
+import seaborn as sns
 import time
 import platform
 import matplotlib.font_manager as fm
-import os
 
-# --- 0. 解决中文乱码 (Windows/Linux 自动适配) ---
+# --- 0. 全局配置与字体适配 ---
+st.set_page_config(page_title="电信 AI 智能营销中台", layout="wide")
+
+# 解决中文乱码 (Windows/Linux 自动适配)
 system_name = platform.system()
 if system_name == "Windows":
     plt.rcParams['font.sans-serif'] = ['SimHei']
 elif system_name == "Linux":
-    # 方案 B: 暴力搜寻法 (直接找字体文件，不猜名字)
-    font_files = fm.findSystemFonts(fontpaths=['/usr/share/fonts'])
-    found_font = False
-    for file in font_files:
-        # 找一个带 CJK (中日韩) 的字体文件
-        if 'CJK' in file and ('SC' in file or 'Sim' in file or 'Noto' in file):
-            try:
-                # 强制添加该字体文件
+    # 暴力搜寻法找中文字体
+    try:
+        font_files = fm.findSystemFonts(fontpaths=['/usr/share/fonts'])
+        for file in font_files:
+            if 'CJK' in file and ('SC' in file or 'Sim' in file or 'Noto' in file):
                 fm.fontManager.addfont(file)
-                # 获取它的真实注册名称
-                prop = fm.FontProperties(fname=file)
-                plt.rcParams['font.sans-serif'] = [prop.get_name()]
-                # print(f"成功加载中文字体: {file} -> {prop.get_name()}")
-                found_font = True
+                plt.rcParams['font.sans-serif'] = [fm.FontProperties(fname=file).get_name()]
                 break
-            except Exception as e:
-                pass
-    
-    if not found_font:
-        # 最后的兜底：如果实在找不到，就用系统默认的无衬线字体，虽然可能还是乱码，但至少不报错
-        plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
+    except:
+        plt.rcParams['font.sans-serif'] = ['DejaVu Sans'] # 兜底
 plt.rcParams['axes.unicode_minus'] = False 
 
-# --- 1. 页面配置 ---
-st.set_page_config(page_title="IBM 电信客户流失预警中台", layout="wide")
-
-st.title("📡 客户流失预警中台 (基于 IBM 真实数据)")
-st.markdown("---")
-
-# --- 2. 核心引擎：读取真实数据并训练 ---
+# --- 1. 数据加载与模型训练核心 ---
 @st.cache_resource
-def load_and_train():
+def init_system():
     # A. 读取真实数据
     try:
         df = pd.read_csv('telco_churn.csv')
-    except FileNotFoundError:
-        st.error("找不到 'telco_churn.csv'，请先运行上一步的下载脚本！")
-        return None, None, None
+    except:
+        st.error("请先运行 real_world_churn.py 下载数据集！")
+        return None, None, None, None
 
-    # B. 硬核清洗
+    # B. 清洗
     df['TotalCharges'] = pd.to_numeric(df['TotalCharges'], errors='coerce')
     df.dropna(inplace=True)
     df['Churn'] = df['Churn'].apply(lambda x: 1 if x == 'Yes' else 0)
-
-    # C. 特征选择 (只选业务最关心的 Top 特征，方便前端输入)
-    # 我们把 Contract, InternetService 等分类变量转为 One-Hot
-    selected_features = [
-        'tenure', 'MonthlyCharges', 'TotalCharges', 
-        'Contract', 'InternetService', 'OnlineSecurity', 'TechSupport'
-    ]
     
-    X_raw = df[selected_features]
+    # C. 特征定义 (Top 7 核心业务特征)
+    features = ['tenure', 'MonthlyCharges', 'TotalCharges', 'Contract', 'InternetService', 'OnlineSecurity', 'TechSupport']
+    
+    # D. 训练风险模型 (Churn Model)
+    X = pd.get_dummies(df[features])
+    model_cols = X.columns # 记录列顺序
     y = df['Churn']
     
-    # One-Hot 编码 (记录下列名，确保预测时一致)
-    X = pd.get_dummies(X_raw)
-    model_columns = X.columns
+    model_churn = RandomForestClassifier(n_estimators=100, class_weight='balanced', random_state=42)
+    model_churn.fit(X, y)
     
-    # D. 训练模型 (使用真实数据!)
-    model = RandomForestClassifier(n_estimators=100, class_weight='balanced', random_state=42)
-    model.fit(X, y)
+    # E. 训练增益模型 (Uplift T-Learner)
+    # 定义干预：Contract != Month-to-month (即：长约视为干预)
+    df_control = df[df['Contract'] == 'Month-to-month'] # 对照组
+    df_treated = df[df['Contract'] != 'Month-to-month'] # 实验组
     
-    return model, model_columns, df
+    # 训练两个模型 (只用数值特征简化 T-Learner 可视化，防止维度爆炸)
+    uplift_feats = ['tenure', 'MonthlyCharges', 'TotalCharges'] 
+    
+    m_control = RandomForestClassifier(n_estimators=100, random_state=42)
+    m_control.fit(df_control[uplift_feats], df_control['Churn'])
+    
+    m_treated = RandomForestClassifier(n_estimators=100, random_state=42)
+    m_treated.fit(df_treated[uplift_feats], df_treated['Churn'])
+    
+    # 预先计算全量数据的 Uplift 用于画图
+    df['Uplift_Score'] = m_control.predict_proba(df[uplift_feats])[:,1] - m_treated.predict_proba(df[uplift_feats])[:,1]
+    
+    return df, model_churn, model_cols, (m_control, m_treated)
 
-model, model_columns, df_raw = load_and_train()
+df_raw, model_churn, model_cols, uplift_models = init_system()
+m_control, m_treated = uplift_models
 
-if model is None:
+if df_raw is None:
     st.stop()
 
-# --- 3. 侧边栏：真实业务场景输入 ---
-st.sidebar.header("📝 客户画像录入")
+st.title("🚀 电信客户全生命周期管理中台")
+st.markdown("**集成模块：** ⚠️ 流失风险预测 | 🎯 营销增益分析 (Uplift) | 👁️ 全局数据洞察")
 
-# 数值型特征
-tenure = st.sidebar.slider("网龄 (月)", 0, 72, 24, help="用户入网时长")
-monthly_charges = st.sidebar.slider("月租费 (元)", 18, 120, 70, help="用户每月的套餐费用")
-# 自动计算总费用 (TotalCharges) 以简化输入
-total_charges = tenure * monthly_charges 
+# --- 2. 侧边栏：统一特征录入 ---
+st.sidebar.header("👤 当前客户画像")
+
+# 数值特征
+tenure = st.sidebar.slider("网龄 (月)", 0, 72, 24)
+monthly_charges = st.sidebar.slider("月租费 ($)", 18, 120, 85)
+total_charges = tenure * monthly_charges # 自动计算
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("业务办理情况")
-
-# 类别型特征 (根据数据集里的真实选项)
+# 类别特征
 contract = st.sidebar.selectbox("合约类型", ['Month-to-month', 'One year', 'Two year'])
-internet_service = st.sidebar.selectbox("互联网接入类型", ['DSL', 'Fiber optic', 'No'])
-online_security = st.sidebar.selectbox("是否开通网络安全", ['Yes', 'No', 'No internet service'])
-tech_support = st.sidebar.selectbox("是否开通技术支持", ['Yes', 'No', 'No internet service'])
+internet = st.sidebar.selectbox("互联网类型", ['Fiber optic', 'DSL', 'No'])
+security = st.sidebar.selectbox("网络安全服务", ['No', 'Yes', 'No internet service'])
+tech_support = st.sidebar.selectbox("技术支持服务", ['No', 'Yes', 'No internet service'])
 
-# --- 4. 预测逻辑 ---
-if st.button("🚀 发起风险评估", type="primary"):
-    with st.spinner('正在比对 7000+ 条真实历史记录...'):
-        time.sleep(0.5)
-        
-        # A. 构造原始输入
-        input_data = pd.DataFrame({
-            'tenure': [tenure],
-            'MonthlyCharges': [monthly_charges],
-            'TotalCharges': [total_charges],
-            'Contract': [contract],
-            'InternetService': [internet_service],
-            'OnlineSecurity': [online_security],
-            'TechSupport': [tech_support]
-        })
-        
-        # B. 对齐特征 (One-Hot)
-        # 关键步骤：必须和训练时的列完全一致，缺少的列补0
-        input_encoded = pd.get_dummies(input_data)
-        input_encoded = input_encoded.reindex(columns=model_columns, fill_value=0)
-        
-        # C. 预测
-        prob = model.predict_proba(input_encoded)[0][1]
-        
-        # --- 5. 结果展示 ---
-        st.subheader("📊 评估报告")
-        col1, col2 = st.columns([1, 2])
-        
-        with col1:
-            st.metric(label="流失概率", value=f"{prob:.1%}")
-            
-            if prob > 0.7:
-                st.error("🔴 极高风险 (High Risk)")
-                st.write("**主要原因推测：**")
-                if contract == 'Month-to-month':
-                    st.write("- **按月付费**：粘性极低，随时可走。")
-                if internet_service == 'Fiber optic':
-                    st.write("- **光纤用户**：通常对价格/质量更挑剔。")
-                if tenure < 12:
-                    st.write("- **新用户**：磨合期容易流失。")
-                    
-            elif prob > 0.3:
-                st.warning("⚠️ 中等风险 (Medium Risk)")
-            else:
-                st.success("🟢 健康状态 (Low Risk)")
+# 构造输入数据 DataFrame
+input_base = pd.DataFrame({
+    'tenure': [tenure], 'MonthlyCharges': [monthly_charges], 'TotalCharges': [total_charges],
+    'Contract': [contract], 'InternetService': [internet], 
+    'OnlineSecurity': [security], 'TechSupport': [tech_support]
+})
 
-        with col2:
-            # D. 真实分布对比图
-            fig, ax = plt.subplots(figsize=(8, 4))
-            # 画两个分布：所有人的月费 vs 流失人群的月费
-            ax.hist(df_raw['MonthlyCharges'], bins=30, alpha=0.3, color='gray', label='全体用户')
-            ax.hist(df_raw[df_raw['Churn']==1]['MonthlyCharges'], bins=30, alpha=0.5, color='red', label='历史流失用户')
-            
-            # 标出当前用户
-            ax.axvline(monthly_charges, color='blue', linestyle='--', linewidth=2, label='当前用户')
-            
-            ax.set_title("月租费分布对比 (红色为高发流失区)")
-            ax.set_xlabel("月租费 ($)")
-            ax.legend()
-            st.pyplot(fig)
-            st.caption("注：红色区域越高，代表该价格段的历史流失人数越多。")
+# --- 3. 主界面 Tabs ---
+tab1, tab2 = st.tabs(["⚠️ 风险预测 (Risk)", "💰 增益分析 (Uplift)"])
 
-st.markdown("---")
-with st.expander("🔍 开发者模式：查看 One-Hot 编码后的特征向量"):
-    # 为了演示给面试官看，展示一下后台实际处理的数据格式
-    input_data_demo = pd.DataFrame({
-            'tenure': [tenure],
-            'MonthlyCharges': [monthly_charges],
-            'TotalCharges': [total_charges],
-            'Contract': [contract],
-            'InternetService': [internet_service],
-            'OnlineSecurity': [online_security],
-            'TechSupport': [tech_support]
-        })
-    input_demo_encoded = pd.get_dummies(input_data_demo).reindex(columns=model_columns, fill_value=0)
-    st.dataframe(input_demo_encoded)
+# ========== TAB 1: 风险预测 ==========
+with tab1:
+    col_kpi, col_viz = st.columns([1, 2])
+    
+    # 1.1 实时预测
+    input_encoded = pd.get_dummies(input_base).reindex(columns=model_cols, fill_value=0)
+    prob_churn = model_churn.predict_proba(input_encoded)[0][1]
+    
+    with col_kpi:
+        st.subheader("流失风险评估")
+        st.metric("流失概率", f"{prob_churn:.1%}")
+        
+        if prob_churn > 0.7:
+            st.error("🔴 极高风险")
+            st.write("建议：立即启动人工关怀流程。")
+        elif prob_churn > 0.4:
+            st.warning("⚠️ 中等风险")
+            st.write("建议：关注其流量使用情况。")
+        else:
+            st.success("🟢 健康状态")
+            st.write("建议：维持现状。")
+
+    with col_viz:
+        st.subheader("📊 数据分布诊断")
+        # 1.2 月租费分布对比图 (修复图例错乱问题)
+        fig, ax = plt.subplots(figsize=(8, 3.5))
+        
+        # 关闭 seaborn 自带图例，改用手动构建
+        sns.histplot(df_raw, x='MonthlyCharges', hue='Churn', kde=True, 
+                     palette={0:'gray', 1:'red'}, element="step", ax=ax, legend=False)
+        
+        # 画当前用户的线
+        ax.axvline(monthly_charges, color='blue', linestyle='--', linewidth=2)
+        
+        # --- 手动构建精准图例 ---
+        from matplotlib.lines import Line2D
+        from matplotlib.patches import Patch
+        
+        legend_elements = [
+            Line2D([0], [0], color='blue', linestyle='--', lw=2, label='当前用户 (You)'),
+            Patch(facecolor='red', alpha=1, label='历史流失 (Churn)'),
+            Patch(facecolor='gray', alpha=1, label='历史留存 (Retain)')
+        ]
+        
+        ax.legend(handles=legend_elements, loc='upper right')
+        ax.set_title("月租费与历史流失人群对比")
+        st.pyplot(fig)
+    
+    st.markdown("---")
+    # 1.3 开发者模式 (One-Hot 向量展示)
+    with st.expander("🔍 开发者模式：查看 One-Hot 特征向量"):
+        st.write("模型实际接收到的稀疏矩阵向量：")
+        st.dataframe(input_encoded.style.highlight_max(axis=1))
+
+# ========== TAB 2: Uplift 增益分析 ==========
+with tab2:
+    st.subheader("📈 营销干预增益分析 (Causal Inference)")
+    
+    # 2.1 计算 Uplift
+    # 我们对比：保持现状(Control) vs 转化为长约(Treated)
+    # 注意：这里我们只用数值特征进 T-Learner，方便展示
+    input_uplift = pd.DataFrame({'tenure':[tenure], 'MonthlyCharges':[monthly_charges], 'TotalCharges':[total_charges]})
+    
+    p_control = m_control.predict_proba(input_uplift)[0][1] # 不干预(Month-to-month)的流失率
+    p_treated = m_treated.predict_proba(input_uplift)[0][1] # 干预后(Two-year)的流失率
+    uplift_val = p_control - p_treated
+    
+    # 2.2 增益可视化 (KPI)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("自然流失率 (基线)", f"{p_control:.1%}", help="如果不做任何干预，用户流失的概率")
+    c2.metric("干预后流失率", f"{p_treated:.1%}", help="如果成功引导签长约，用户流失的概率")
+    c3.metric("营销增益 (Uplift)", f"{uplift_val:.1%}", delta_color="normal", help="干预带来的风险降低幅度")
+
+    # 2.3 干预效果对比图
+    st.markdown("#### 干预效果模拟")
+    fig_bar, ax_bar = plt.subplots(figsize=(6, 2))
+    bars = ax_bar.barh(['不干预', '推销长约'], [p_control, p_treated], color=['gray', '#2ecc71'])
+    ax_bar.set_xlim(0, 1)
+    ax_bar.set_xlabel("流失概率")
+    ax_bar.bar_label(bars, fmt='%.1f%%')
+    st.pyplot(fig_bar)
+
+    st.markdown("---")
+    
+    # 2.4 全局 Uplift 分布图 (P7级大杀器)
+    st.subheader("🗺️ 全局营销价值定位 (Uplift Distribution)")
+    st.caption("下图展示了全量用户的营销价值分布。红色越深代表‘挽留价值’越高。五角星 ★ 代表当前用户位置。")
+    
+    fig_up, ax_up = plt.subplots(figsize=(10, 5))
+    # 画背景：全量用户的散点图
+    sc = ax_up.scatter(df_raw['tenure'], df_raw['MonthlyCharges'], 
+                       c=df_raw['Uplift_Score'], cmap='RdBu_r', 
+                       alpha=0.6, s=15, label='历史用户')
+    
+    # 画当前用户：五角星
+    ax_up.scatter([tenure], [monthly_charges], color='gold', s=300, marker='*', edgecolors='black', label='当前用户')
+    
+    plt.colorbar(sc, label='营销增益 (Uplift Score)')
+    ax_up.set_xlabel("网龄 (Tenure)")
+    ax_up.set_ylabel("月租费 (Monthly Charges)")
+    ax_up.set_title("谁值得被挽留？(Uplift 画像定位)")
+    ax_up.legend()
+    
+    st.pyplot(fig_up)
+    
+    # 2.5 策略建议
+    if uplift_val > 0.3:
+        st.success(f"💎 **高潜用户**：该用户位于 Uplift 红色高值区！挽留成功率极高，建议提供 **30% 折扣换取年费合约**。")
+    elif uplift_val > 0.1:
+        st.warning(f"⚖️ **摇摆用户**：有一定挽留价值，建议发送关怀短信。")
+    else:
+        st.info(f"💤 **低效用户**：干预效果不明显（可能是铁粉或死敌），建议节省预算。")
+
+st.sidebar.markdown("---")
+st.sidebar.caption("Powered by XGBoost & T-Learner")
